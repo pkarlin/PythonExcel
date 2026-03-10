@@ -1,0 +1,8 @@
+__pycache__/
+*.xls
+*.xlsx
+.venv
+venv/
+env/
+.env
+run_converter.bat
