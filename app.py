@@ -4,7 +4,7 @@ import io
 
 st.set_page_config(page_title="Excel to Tabular Converter", page_icon="📊", layout="wide")
 
-def process_excel(file):
+def process_ledger(file):
     # Read without header to find the actual header row
     df_raw = pd.read_excel(file, header=None)
     
@@ -154,47 +154,221 @@ def process_excel(file):
                 
     return result_df, summary_df
 
-st.title("📊 Excel to Tabular Converter")
-st.markdown("""
-Upload a hierarchical Excel report to convert it into a flat, tabular layout.
-This application extracts **Account (Tili_ryhmä)** headers and applies them as a new column for their associated transaction rows.
-Total rows (`Yhteensä`) and account headers are removed to provide purely tabular data.
-""")
+def process_ageing(file):
+    # Read without header to find the actual header row
+    df_raw = pd.read_excel(file, header=None)
+    
+    header_idx = 0
+    for idx, row in df_raw.iterrows():
+        # Check if the row contains typical header column names for Ageing report
+        row_strs = [str(x).lower().strip() for x in row.values if pd.notna(x)]
+        if any('alle 14vrk' in s or 'saldo' in s for s in row_strs):
+            header_idx = idx
+            break
+            
+    df = pd.read_excel(file, header=header_idx)
+    
+    if df.empty:
+        return pd.DataFrame(), None
+        
+    processed_data = []
+    current_property = "Unknown Property"
+    
+    for index, row in df.iterrows():
+        col1_val = str(row.iloc[0]).strip() if pd.notna(row.iloc[0]) else ""
+        col2_val = str(row.iloc[1]).strip() if pd.notna(row.iloc[1]) else ""
+        
+        row_text_lower = " ".join([str(x).lower().strip() for x in row.values if pd.notna(x)])
+        
+        if not row_text_lower:
+            continue
+            
+        has_numbers = False
+        # Check from column 2 onwards for numbers (index 2+)
+        if len(row) > 2:
+            for val in row.values[2:]:
+                if pd.notna(val) and str(val).strip() != "":
+                    stripped = str(val).strip().replace(',', '.').replace(' ', '').replace('€', '')
+                    try:
+                        float(stripped)
+                        has_numbers = True
+                        break
+                    except ValueError:
+                        pass
+                    
+        if not has_numbers:
+            # It might be a property header, or "Sopimus päättynyt:"
+            if col1_val and not col2_val:
+                if "sopimus" not in col1_val.lower() and "yhteensä" not in col1_val.lower():
+                    current_property = col1_val
+            continue
+            
+        # Total rows have col2_val as empty
+        if has_numbers and not col2_val:
+            continue
+            
+        if has_numbers and col2_val:
+            row_dict = row.to_dict()
+            row_dict['Kiinteistö'] = current_property
+            processed_data.append(row_dict)
+            
+    result_df = pd.DataFrame(processed_data)
+    
+    if not result_df.empty:
+        # Reorder columns
+        cols = ['Kiinteistö'] + [col for col in result_df.columns if col != 'Kiinteistö']
+        result_df = result_df[cols]
+        
+        unnamed_cols = [c for c in result_df.columns if str(c).startswith('Unnamed:')]
+        for c in unnamed_cols:
+            if result_df[c].isna().all() or (result_df[c] == '').all():
+                result_df = result_df.drop(columns=[c])
+                
+        if 'Unnamed: 0' in result_df.columns:
+            result_df = result_df.rename(columns={'Unnamed: 0': 'Tunnus/Nimi'})
+        if 'Unnamed: 1' in result_df.columns:
+            result_df = result_df.rename(columns={'Unnamed: 1': 'Selite'})
+            
+    return result_df, None
 
-uploaded_file = st.file_uploader("Choose an Excel report file", type=["xls", "xlsx"])
-
-if uploaded_file is not None:
-    try:
-        with st.spinner("Processing data..."):
-            tabular_df, summary_df = process_excel(uploaded_file)
-            
-        if not tabular_df.empty:
-            st.success("File processed successfully!")
-            
-            st.subheader("Data Preview")
-            st.dataframe(tabular_df.head(100), use_container_width=True)
-            
+def display_results(tabular_df, summary_df, default_filename):
+    if not tabular_df.empty:
+        st.success("File processed successfully!")
+        
+        st.subheader("Data Preview")
+        st.dataframe(tabular_df.head(100), use_container_width=True)
+        
+        if summary_df is not None and not summary_df.empty:
+            st.subheader("Cost Summary")
+            st.dataframe(summary_df.head(100), use_container_width=True)
+        
+        # Create Excel file in memory for download
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+            tabular_df.to_excel(writer, index=False, sheet_name='Tabular Data')
             if summary_df is not None and not summary_df.empty:
-                st.subheader("Cost Summary per Vendor")
-                st.dataframe(summary_df.head(100), use_container_width=True)
+                summary_df.to_excel(writer, index=False, sheet_name='Summary')
+        
+        st.download_button(
+            label=f"📥 Download {default_filename}",
+            data=buffer.getvalue(),
+            file_name=default_filename,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+            use_container_width=True
+        )
+    else:
+        st.warning("No data could be extracted. Please check the structure of the uploaded Excel file.")
+
+def process_cost_centers(file):
+    # Read without header to find the actual header row
+    df_raw = pd.read_excel(file, header=None)
+    
+    header_idx = 0
+    for idx, row in df_raw.iterrows():
+        # Check if the row contains typical header column names for Cost Centers report
+        row_strs = [str(x).lower().strip() for x in row.values if pd.notna(x)]
+        if any('alle 14vrk' in s or 'saldo' in s for s in row_strs):
+            header_idx = idx
+            break
             
-            # Create Excel file in memory for download
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                tabular_df.to_excel(writer, index=False, sheet_name='Tabular Data')
-                if summary_df is not None and not summary_df.empty:
-                    summary_df.to_excel(writer, index=False, sheet_name='Summary by Vendor')
+    df = pd.read_excel(file, header=header_idx)
+    
+    if df.empty:
+        return pd.DataFrame(), None
+        
+    processed_data = []
+    
+    for index, row in df.iterrows():
+        col1_val = str(row.iloc[0]).strip() if pd.notna(row.iloc[0]) else ""
+        
+        row_text_lower = " ".join([str(x).lower().strip() for x in row.values if pd.notna(x)])
+        if not row_text_lower:
+            continue
             
-            st.download_button(
-                label="📥 Download Tabular Excel",
-                data=buffer.getvalue(),
-                file_name="Converted_Tabular_Data.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
-                use_container_width=True
-            )
-        else:
-            st.warning("No data could be extracted. Please check the structure of the uploaded Excel file or verify if it contains transaction rows.")
+        has_numbers = False
+        # Check from column 1 onwards for numbers
+        if len(row) > 1:
+            for val in row.values[1:]:
+                if pd.notna(val) and str(val).strip() != "":
+                    # handle possible formatted strings
+                    stripped = str(val).strip().replace(',', '.').replace(' ', '').replace('€', '').replace('\xa0', '')
+                    try:
+                        float(stripped)
+                        has_numbers = True
+                        break
+                    except ValueError:
+                        pass
+                        
+        if has_numbers and col1_val:
+            if "yhteensä" in col1_val.lower() or "saldo" == col1_val.lower():
+                continue # Skip total row
+                
+            row_dict = row.to_dict()
+            processed_data.append(row_dict)
             
-    except Exception as e:
-        st.error(f"An error occurred while processing the file: {e}")
+    result_df = pd.DataFrame(processed_data)
+    
+    if not result_df.empty:
+        first_col = result_df.columns[0]
+        # Rename the first column to indicate Cost Center if it doesn't already have a good name
+        if str(first_col).startswith('Unnamed:'):
+            result_df = result_df.rename(columns={first_col: 'Kustannuspaikka'})
+        
+        # Clean up unnamed empty columns
+        unnamed_cols = [c for c in result_df.columns if str(c).startswith('Unnamed:')]
+        for c in unnamed_cols:
+            if result_df[c].isna().all() or (result_df[c] == '').all():
+                result_df = result_df.drop(columns=[c])
+                
+    return result_df, None
+
+st.title("📊 Excel to Tabular Converter")
+st.markdown("Choose the correct bucket below to upload your Excel file.")
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    st.header("1. General Ledger")
+    st.markdown("""
+    Convert **Transactions (Pääkirja)** reports. Extracts **Account (Tili_ryhmä)** headers.
+    """)
+    uploaded_ledger = st.file_uploader("Upload General Ledger report", type=["xls", "xlsx"], key="ledger")
+    
+    if uploaded_ledger is not None:
+        try:
+            with st.spinner("Processing General Ledger..."):
+                tabular_df, summary_df = process_ledger(uploaded_ledger)
+            display_results(tabular_df, summary_df, "Converted_General_Ledger.xlsx")
+        except Exception as e:
+            st.error(f"Error processing General Ledger: {e}")
+
+with col2:
+    st.header("2. Ageing Report")
+    st.markdown("""
+    Convert **Ageing (Saamisten ikäjakauma)** reports. Extracts **Property (Kiinteistö)** headers.
+    """)
+    uploaded_ageing = st.file_uploader("Upload Ageing report", type=["xls", "xlsx"], key="ageing")
+    
+    if uploaded_ageing is not None:
+        try:
+            with st.spinner("Processing Ageing Report..."):
+                tabular_df, summary_df = process_ageing(uploaded_ageing)
+            display_results(tabular_df, summary_df, "Converted_Ageing_Report.xlsx")
+        except Exception as e:
+            st.error(f"Error processing Ageing Report: {e}")
+
+with col3:
+    st.header("3. Cost Centers")
+    st.markdown("""
+    Convert **Cost Centers (Saamiset kustannuspaikoittain)** reports. Flattens data rows.
+    """)
+    uploaded_cost = st.file_uploader("Upload Cost Centers report", type=["xls", "xlsx"], key="cost_centers")
+    
+    if uploaded_cost is not None:
+        try:
+            with st.spinner("Processing Cost Centers Report..."):
+                tabular_df, summary_df = process_cost_centers(uploaded_cost)
+            display_results(tabular_df, summary_df, "Converted_Cost_Centers_Report.xlsx")
+        except Exception as e:
+            st.error(f"Error processing Cost Centers Report: {e}")

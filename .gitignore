@@ -6,3 +6,5 @@ venv/
 env/
 .env
 run_converter.bat
+how to deploy to other users.md
+gitignore
