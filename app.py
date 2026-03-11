@@ -168,10 +168,8 @@ def process_ageing(file):
             
     df = pd.read_excel(file, header=header_idx)
     
-    if df.empty:
-        return pd.DataFrame(), None
-        
-    processed_data = []
+    blocks = []
+    current_block = []
     current_property = "Unknown Property"
     
     for index, row in df.iterrows():
@@ -188,47 +186,102 @@ def process_ageing(file):
         if len(row) > 2:
             for val in row.values[2:]:
                 if pd.notna(val) and str(val).strip() != "":
-                    stripped = str(val).strip().replace(',', '.').replace(' ', '').replace('€', '')
+                    cleaned_val = str(val).strip().replace(',', '.').replace(' ', '').replace('€', '').replace('\xa0', '')
                     try:
-                        float(stripped)
+                        float(cleaned_val)
                         has_numbers = True
                         break
                     except ValueError:
                         pass
-                    
+                        
+        cleaned_col1 = col1_val.lower().replace(" ", "").replace("\xa0", "")
+        
+        # Always skip "Sopimus päättynyt" rows (and any row where col1 starts with "sopimus")
+        if "sopimus" in cleaned_col1:
+            continue
+        
         if not has_numbers:
-            # It might be a property header, or "Sopimus päättynyt:"
+            # Any text-only row finishes an apartment block
+            if current_block:
+                blocks.append((current_property, current_block))
+                current_block = []
+                
+            # If it looks like a property header, update current_property.
+            # A valid property header must start with a digit (property code like 091291001...)
+            # to avoid short continuation lines (e.g. "M", "Espoo") being mistaken as a new property.
             if col1_val and not col2_val:
-                if "sopimus" not in col1_val.lower() and "yhteensä" not in col1_val.lower():
+                if "sopimus" in cleaned_col1 or "yhteensä" in cleaned_col1 or "saldo" in cleaned_col1 or cleaned_col1 in ["kmp", "kmhp"]:
+                    continue
+                if col1_val[0].isdigit():
                     current_property = col1_val
+                # else: it's a continuation/overflow line — ignore it
             continue
             
-        # Total rows have col2_val as empty
-        if has_numbers and not col2_val:
+        # If we reach here, the row HAS numbers.
+        if "yhteensä" in cleaned_col1 or "saldo" in cleaned_col1 or cleaned_col1 in ["kmp", "kmhp"]:
+            # This is the end-of-apartment total row
+            if current_block:
+                blocks.append((current_property, current_block))
+                current_block = []
             continue
             
-        if has_numbers and col2_val:
-            row_dict = row.to_dict()
-            row_dict['Kiinteistö'] = current_property
-            processed_data.append(row_dict)
+        # Accumulate all lines (charges, sub-tenant totals) into the current block
+        current_block.append(row)
+        
+    if current_block:
+        blocks.append((current_property, current_block))
+
+    processed_data = []
+    
+    for prop, b in blocks:
+        if not b: continue
+        
+        apt_name = str(b[0].iloc[0]).strip() if pd.notna(b[0].iloc[0]) else ""
+        tenant_name = ""
+        
+        # Look ahead in the block for the tenant name
+        # The tenant name usually appears on the 2nd (or 3rd) line in col1
+        for _row in b[1:]:
+            val = str(_row.iloc[0]).strip() if pd.notna(_row.iloc[0]) else ""
+            cleaned_val = val.lower().replace(" ", "").replace("\xa0", "")
+            if val and "yhteensä" not in cleaned_val and cleaned_val not in ["kmp", "kmhp"]:
+                tenant_name = val
+                break
+        
+        # If the apartment name is empty but tenant_name has a value, it means only one
+        # identifying row existed (e.g. a parking unit line), so promote it to Huoneisto.
+        if not apt_name and tenant_name:
+            apt_name = tenant_name
+            tenant_name = ""
+                
+        # Now walk all rows and keep only those with actual charge types (Selite)
+        for _row in b:
+            c2_val = str(_row.iloc[1]).strip() if pd.notna(_row.iloc[1]) else ""
+            if c2_val: 
+                r_dict = _row.to_dict()
+                r_dict['Kiinteistö'] = prop
+                r_dict['Huoneisto'] = apt_name
+                r_dict['Asukas'] = tenant_name
+                processed_data.append(r_dict)
             
     result_df = pd.DataFrame(processed_data)
     
     if not result_df.empty:
-        # Reorder columns
-        cols = ['Kiinteistö'] + [col for col in result_df.columns if col != 'Kiinteistö']
-        result_df = result_df[cols]
+        col_names = list(result_df.columns)
+        first_col = col_names[0]
+        second_col = col_names[1]
+        
+        result_df = result_df.rename(columns={second_col: 'Selite'})
+        
+        cols = ['Kiinteistö', 'Huoneisto', 'Asukas', 'Selite']
+        other_cols = [c for c in result_df.columns if c not in cols and c != first_col]
+        result_df = result_df[cols + other_cols]
         
         unnamed_cols = [c for c in result_df.columns if str(c).startswith('Unnamed:')]
         for c in unnamed_cols:
             if result_df[c].isna().all() or (result_df[c] == '').all():
                 result_df = result_df.drop(columns=[c])
                 
-        if 'Unnamed: 0' in result_df.columns:
-            result_df = result_df.rename(columns={'Unnamed: 0': 'Tunnus/Nimi'})
-        if 'Unnamed: 1' in result_df.columns:
-            result_df = result_df.rename(columns={'Unnamed: 1': 'Selite'})
-            
     return result_df, None
 
 def display_results(tabular_df, summary_df, default_filename):
